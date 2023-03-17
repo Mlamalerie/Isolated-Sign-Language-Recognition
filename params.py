@@ -1,0 +1,1 @@
+BASE_DATASET_PATH = r"C:/Users/mlamali.saidsalimo/Downloads/Hand Gesture Recognition (HGR)/asl-signs"

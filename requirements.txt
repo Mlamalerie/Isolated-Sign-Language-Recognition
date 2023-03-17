@@ -1,0 +1,10 @@
+mediapipe
+opencv-python
+fastparquet
+pyarrow
+tqdm
+pandas
+matplotlib
+plotly
+
+
