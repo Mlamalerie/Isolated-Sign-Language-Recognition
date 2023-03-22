@@ -65,8 +65,8 @@ def make_animation(df_train: pd.DataFrame, sign: str, participant_id: int, seque
     """
 
     # worker thread details
-    thread = current_thread()
-    print(f'> Worker thread: name={thread.name}...', end=' ')
+    #thread = current_thread()
+    #print(f'> Worker thread: name={thread.name}...', end=' ')
 
     # check if sign is valid
     if sign not in df_train.sign.unique().tolist():
@@ -82,13 +82,13 @@ def make_animation(df_train: pd.DataFrame, sign: str, participant_id: int, seque
     row_sequence = rows_sequences.iloc[sequence_id_idx]
     sequence_id = row_sequence.sequence_id
 
-    output_dir_path = output_dir_path or os.path.join(os.getcwd(), "output")
+    output_dir_path = output_dir_path or os.path.join(os.getcwd(), "animations")
     output_dir_path = os.path.join(output_dir_path, sign)
     gif_file_name = f"{sign}_{participant_id}_{sequence_id}_{fps}.gif"
     output_full_path_gif = os.path.join(output_dir_path, gif_file_name)
 
     if os.path.exists(output_full_path_gif) and not overwrite:
-        print(f"animation already exists")
+        # print(f"animation already exists")
         return output_full_path_gif
 
     df_landmark_sequence = pd.read_parquet(f"{BASE_DATASET_PATH}/{row_sequence.path}")
@@ -118,7 +118,7 @@ def make_animation(df_train: pd.DataFrame, sign: str, participant_id: int, seque
 
     plt.close(fig)
 
-    print(f"animation saved at {output_full_path_gif}/")
+    #print(f"animation saved at {output_full_path_gif}/")
 
     return output_full_path_gif
 
@@ -161,26 +161,22 @@ def main_parallelized():
     participants: list = df_train.participant_id.unique().tolist()
     random.shuffle(participants)
 
-    participants_to_gif: list = participants[:10]
+    participants_to_gif: list = participants[:2]
     print(f"Participants: {participants_to_gif}")
-    MAX_SEQUENCES_PER_PARTICIPANT = 2
+    MAX_SEQUENCES_PER_PARTICIPANT = 10
 
     # create a list of arguments to pass to the make_animation function
     args = [(sign, participant_id, idx_sequence, 60, None, False) for sign in signs_to_gif for participant_id in
             participants_to_gif for idx_sequence in range(MAX_SEQUENCES_PER_PARTICIPANT)]
 
     # main thread details
-    thread = current_thread()
-    print(f'Main thread: name={thread.name}, idnet={get_ident()}, id={get_native_id()}')
+    #thread = current_thread()
+    #print(f'Main thread: name={thread.name}, idnet={get_ident()}, id={get_native_id()}')
 
-    with ThreadPoolExecutor() as executor:
+    N_WORKERS = 10
+    with ThreadPoolExecutor(max_workers=N_WORKERS) as executor:
         # submit tasks to executor
-        tasks = [executor.submit(make_animation, df_train, *arg) for arg in args]
-
-        # use as_completed to get the results as they are completed
-        for future in as_completed(tasks):
-            # print thread id
-            result = future.result()
+        results = list(tqdm(executor.map(lambda x: make_animation(df_train, *x), args), total=len(args)))
 
 
 if __name__ == "__main__":
