@@ -1,4 +1,7 @@
+import inspect
 import random
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -12,19 +15,22 @@ from tqdm import tqdm
 import json
 from typing import List, Dict, Tuple, Union, Optional, Any
 
+# Constants
 FACE_N_LANDMARKS = 468
 HAND_N_LANDMARKS = 21
 POSE_N_LANDMARKS = 33
 ROWS_PER_FRAME = FACE_N_LANDMARKS + HAND_N_LANDMARKS * 2 + POSE_N_LANDMARKS  # 543
 
-NUM_SHARDS = 2
-BATCH_SIZE = 256
+# Generation parameters
 DATA_COLUMNS = ["x", "y"]
+GROUPING_BY_PARTICIPANT = True
+LIMIT_PARTICIPANTS = None
 
-N_WORKERS = 15
+VAL_SIZE = 0.1  # 10% of the data will be used for validation
+NUM_SHARDS = 2  # divide the dataset into 2 shards. In general [2-10] is a good number
+BATCH_SIZE = 256
+
 OVERWRITE = False
-DROP_Z = True  # keep only x and y columns
-LIMIT_PARTICIPANTS = 10
 
 SET_LANDMARKS = set(
     [f"face-{i:03d}" for i in range(FACE_N_LANDMARKS)] + [f"left_hand-{i:03d}" for i in range(HAND_N_LANDMARKS)] + [
@@ -39,112 +45,20 @@ def load_json_file(file_path: str) -> dict:
         return json.load(f)
 
 
-def _bytes_feature(value):
-    """Returns a bytes_list from a string / byte."""
-    if isinstance(value, type(tf.constant(0))):
-        value = value.numpy()  # BytesList won't unpack a string from an EagerTensor.
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
-
-
-def _float_feature(value):
-    """Returns a float_list from a float / double."""
-    return tf.train.Feature(float_list=tf.train.FloatList(value=[value]))
-
-
-def _int64_feature(value):
-    """Returns an int64_list from a bool / enum / int / uint."""
-    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
-
-
-def to_serialized_example(df: pd.DataFrame, sign: str, participant_id: int, sequence_id: int):
-    """Convert dataframe to tfrecord example."""
-    # create example
-    example = tf.train.Example(features=tf.train.Features(feature={
-        "sign": _bytes_feature(sign.encode()),
-        "participant_id": _int64_feature(participant_id),
-        "sequence_id": _int64_feature(sequence_id),
-        "landmarks": _bytes_feature(df.to_msgpack(compress="zlib")),
-    }))
-    return example.SerializeToString()
-
-
-def load_relevant_data_subset(pq_path: str, data_columns: list = DATA_COLUMNS) -> np.ndarray:
+def load_relevant_data_subset(pq_path: str, rows_per_frame: int = ROWS_PER_FRAME,
+                              data_columns: list = DATA_COLUMNS) -> np.ndarray:
     data = pd.read_parquet(pq_path, columns=data_columns)
     n_frames = int(len(data) / ROWS_PER_FRAME)
     data = data.values.astype(np.float32)
-    return data.reshape(n_frames, ROWS_PER_FRAME, len(data_columns))
-
-
-def clean_sequences_landmarks_df(df, drop_z=False):
-    """Clean sequences landmarks dataframe."""
-
-    # delete z column if exists
-    if "z" in df.columns and drop_z:
-        df = df.drop(columns=["z"])
-
-    # normalize x and y values
-    # scaler = MinMaxScaler()
-    # df[["x", "y"]] = scaler.fit_transform(df[["x", "y"]])
-
-    # uniques frames
-    frames = df["frame"].unique().tolist()  # [0, 1, 2, ..., 18] or [23, 24, 25, ..., 41]
-    frame_to_new_frame = {frame: i for i, frame in enumerate(frames)}  # map frame to new frame
-
-    # rename row_id : 18-face-1 -> 0-face-001, 18-face-002 -> 0-face-002, ..., 19-face-001 -> 1-face-001, ...
-    df["row_id"] = df["row_id"].apply(
-        lambda
-            row_id: f"{frame_to_new_frame[int(row_id.split('-')[0])]}-{row_id.split('-')[1]}-{int(row_id.split('-')[2]):03d}")
-
-    # sort by row_id
-    df = df.sort_values("row_id")
-    # index by row_id
-    df = df.set_index("row_id")
-
-    return df
-
-
-def verify_sequences_landmarks_df(df: pd.DataFrame) -> bool:
-    """Verify sequences landmarks dataframe."""
-    # unique row id without frame prefix
-    series_row_id = df.index.map(lambda x: "-".join(x.split("-")[1:]))
-    row_id_unique_names = series_row_id.unique()
-    n_rows = len(df)
-
-    # check if all landmarks are present
-    if not set(df["type"].unique()) == SET_LANDMARKS_TYPES:
-        return False, "Invalid landmarks types"
-    if not set(row_id_unique_names) == SET_LANDMARKS:
-        return False, "Invalid number of landmarks"
-    if not n_rows % len(SET_LANDMARKS) == 0:
-        return False, "Invalid number of rows"
-
-    return True, "Valid dataframe"
-
-
-def preprocess_sequences_landmarks_df(parquet_path: str, drop_z=False) -> pd.DataFrame:
-    # read parquet file
-    df = pd.read_parquet(parquet_path)
-
-    # clean dataframe
-    df = clean_sequences_landmarks_df(df, drop_z=drop_z)
-
-    # verify dataframe
-    is_valid, msg = verify_sequences_landmarks_df(df)
-    if not is_valid:
-        raise ValueError(f"Invalid dataframe ({parquet_path}): {msg}")
-
-    # keep only ["row_id", "x", "y"] columns
-    df = df[["x", "y"]] if drop_z else df[["x", "y", "z"]]
-
-    return df
+    return data.reshape(n_frames, rows_per_frame, len(data_columns))
 
 
 def split_dataset(df, val_size=0.2, random_state=42, grouping_by_participant=True):
     """Split dataset into train and validation set."""
     if grouping_by_participant:
         participant_ids = df["participant_id"].unique()
-        df_trains : List[pd.DataFrame] = []
-        df_vals : List[pd.DataFrame] = []
+        df_trains: List[pd.DataFrame] = []
+        df_vals: List[pd.DataFrame] = []
         for participant_id in participant_ids:
             df_participant = df[df["participant_id"] == participant_id]
             df_train, df_val = train_test_split(df_participant, test_size=val_size, random_state=random_state)
@@ -173,10 +87,10 @@ def tf_get_features(ftensor):
 def set_shape(x):
     # None dimensions can be of any length
     # ensure_shape will raise an error if the shape is not as expected
-    return tf.ensure_shape(x, (None, ROWS_PER_FRAME, len(DATA_COLUMNS))) # (None, 468, 3)
+    return tf.ensure_shape(x, (None, ROWS_PER_FRAME, len(DATA_COLUMNS)))  # (None, 468, 3)
 
 
-def create_ds(df: pd.DataFrame, sign_ids: dict, batch_size: int):
+def create_ds(df: pd.DataFrame, sign_ids: dict, batch_size: int) -> tf.data.Dataset:
     X_ds = tf.data.Dataset.from_tensor_slices(
         df.path.values  # start with a dataset of the parquet paths
     ).map(
@@ -195,87 +109,110 @@ def create_ds(df: pd.DataFrame, sign_ids: dict, batch_size: int):
     # zip the features and labels
     return tf.data.Dataset.zip((X_ds, y_ds))
 
-# save dataset to tfrecord
-def save_dataset(ds: tf.data.Dataset, output_dir: str):
-    # Créez le répertoire de sortie s'il n'existe pas
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Créez un itérateur pour parcourir le dataset
-    iterator = iter(ds)
-
-
-    # Parcourez le dataset et enregistrez chaque élément dans un fichier TFRecord
-    file_index = 0
-    while True:
-        try:
-            # Obtenez le prochain élément du dataset
-            example = next(iterator)
-
-            # Générez le nom de fichier pour cet exemple
-            filename = f"{output_dir}/data_{file_index}.tfrecord"
-
-            # Enregistrez l'exemple dans le fichier
-            with tf.io.TFRecordWriter(filename) as writer:
-                writer.write(example.numpy())
-
-            # Incrémentez l'index de fichier
-            file_index += 1
-        except StopIteration:
-            break
-
-    print(f"Le dataset a été enregistré dans {file_index} fichiers TFRecord.")
-
 
 # Sharding could be improved, as the distribution of elements in different shards should optimally be equal.
 # Currently, it will be a sample from a uniform distribution because this is simple to implement
 def shard_func(*_):
     return tf.random.uniform(shape=[], maxval=NUM_SHARDS, dtype=tf.int64)
 
+
+# generate metadata file, with parameters
+def generate_metadata_file(output_dir: str, sign_ids: dict, batch_size: int, data_columns: list, num_shards: int,
+                           val_size: float, len_train: int, len_val: int,
+                           grouping_by_participant: bool, limit_participants: int):
+    # Créez le répertoire de sortie s'il n'existe pas
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Enregistrez les paramètres du dataset dans un fichier JSON
+    with open(f"{output_dir}/metadata.json", "w") as f:
+        json.dump({
+            "batch_size": batch_size,
+            "sign_ids": sign_ids,
+            "data_columns": data_columns,
+            "num_shards": num_shards,
+            "len_train": len_train,
+            "len_val": len_val,
+            "val_size": val_size,
+            "grouping_by_participant": grouping_by_participant,
+            "limit_participants": limit_participants,
+        }, f)
+
+    print("> Le fichier de métadonnées a été enregistré.")
+
+
+def get_participant_ids(dirpath: str, limit_participants: int = None):
+    participant_ids = os.listdir(dirpath)
+    random.seed(42)
+    random.shuffle(participant_ids)
+    if limit_participants:
+        participant_ids = participant_ids[:limit_participants]
+    return [int(participant_id) for participant_id in participant_ids]
+
+
 def main():
+    new_landmark_files_dirname = f'landmark_files_preprocessed__{"".join(DATA_COLUMNS)}__ids_{LIMIT_PARTICIPANTS or "all"}__val_{VAL_SIZE}'
+    new_landmark_files_dirpath = f"{BASE_DATASET_PATH}/{new_landmark_files_dirname}"
+    print("-" * 80)
+    print(f"* Output dir: {new_landmark_files_dirpath}")
+    print(f"* Limit participants: {LIMIT_PARTICIPANTS}")
+    print(f"* Data columns: {DATA_COLUMNS}")
+    print(f"* Batch size: {BATCH_SIZE}")
+    print(f"* Validation size: {VAL_SIZE}")
+    print(f"* Number of shards: {NUM_SHARDS}")
+    print("-" * 80)
 
-    new_train_landmark_files_dirname = f'train_landmark_files_preprocessed_{"xyz" if not DROP_Z else "xy"}_{LIMIT_PARTICIPANTS if LIMIT_PARTICIPANTS else "all"}'
-
-    for dir_to_create in [f"{new_train_landmark_files_dirname}/train", f"{new_train_landmark_files_dirname}/val"]:
-        os.makedirs(f"{BASE_DATASET_PATH}/{dir_to_create}", exist_ok=True)
-
-    print(f"* Number of workers: {N_WORKERS}")
-    print(f"* Overwrite: {OVERWRITE}")
-    print(f"* Drop z: {DROP_Z}")
-    print(f"* Output dir: {BASE_DATASET_PATH}/{new_train_landmark_files_dirname}")
-
+    # sign to prediction index map
     sign_to_prediction_index_map_path = f"{BASE_DATASET_PATH}/sign_to_prediction_index_map.json"
     s2p_map = load_json_file(sign_to_prediction_index_map_path)
-    p2s_map = {v: k for k, v in s2p_map.items()}
 
+    # load train.csv
     train_path = f"{BASE_DATASET_PATH}/train.csv"
     df_train_full = pd.read_csv(train_path).sort_values(by=["participant_id", "sign", "sequence_id"]).reset_index(
         drop=True)
 
-    # limit number of participants
-    if LIMIT_PARTICIPANTS is not None:
-        # get random participants id
-        participants_id = df_train_full["participant_id"].unique()
-        random.seed(42)
-        random.shuffle(participants_id)
-        participants_id = participants_id[:LIMIT_PARTICIPANTS]
-        df_train_full = df_train_full[df_train_full["participant_id"].isin(participants_id)]
+    # limit number of participants, get random participants id
+    participant_ids = get_participant_ids(f"{BASE_DATASET_PATH}/train_landmark_files",
+                                          limit_participants=LIMIT_PARTICIPANTS)
+
+    df_train_full = df_train_full[df_train_full["participant_id"].isin(participant_ids)]
+
+    # add base path to parquet files
     df_train_full["path"] = df_train_full["path"].apply(lambda parquet_path: f"{BASE_DATASET_PATH}/{parquet_path}")
 
-    df_train, df_val = split_dataset(df_train_full, val_size=0.2, random_state=12, grouping_by_participant=False)
-
-    parquet_paths_train = df_train["path"].tolist()
+    # split dataset
+    df_train, df_val = split_dataset(df_train_full, val_size=VAL_SIZE, random_state=12,
+                                     grouping_by_participant=GROUPING_BY_PARTICIPANT)
+    print(f"> Train dataset size: {len(df_train)}")
+    print(f"> Validation dataset size: {len(df_val)}")
+    print(f"> Number of classes: {len(s2p_map)}")
+    print("-" * 80)
 
     # train dataset
     train_ds = create_ds(df_train, s2p_map, batch_size=BATCH_SIZE)
-    save_train_ds_path = f"{BASE_DATASET_PATH}/{new_train_landmark_files_dirname}/trainDataset"
-    train_ds.prefetch(tf.data.AUTOTUNE).save(save_train_ds_path, shard_func=shard_func) # save dataset
-    print(f"> Train dataset saved to {save_train_ds_path} with {len(parquet_paths_train)} elements.")
+    train_example = next(iter(train_ds))
+    print(f"> train example shape: {train_example[0].shape}")
+    ## save train dataset
+    save_train_ds_path = f"{new_landmark_files_dirpath}/trainDataset"
+    train_ds.prefetch(tf.data.AUTOTUNE).save(save_train_ds_path, shard_func=shard_func)  # save dataset
+    train_ds_cardinality = tf.data.experimental.cardinality(train_ds)
+    train_ds_size = train_ds_cardinality.numpy() * BATCH_SIZE
+    print(f">>> Train tf.dataset saved. Cardinality: {train_ds_cardinality}, size: {train_ds_size}.")
 
     # validation dataset
     val_ds = create_ds(df_val, s2p_map, batch_size=BATCH_SIZE)
-    save_val_ds_path = f"{BASE_DATASET_PATH}/{new_train_landmark_files_dirname}/valDataset"
-    val_ds.prefetch(tf.data.AUTOTUNE).save(save_val_ds_path, shard_func=shard_func) # save dataset
-    print(f"> Validation dataset saved to {save_val_ds_path} with {len(df_val)} elements.")
+    val_example: tf.data.Dataset = next(iter(val_ds))
+    print(f"> validation example shape: {val_example[0].shape}")
+    ## save validation dataset
+    save_val_ds_path = f"{new_landmark_files_dirpath}/valDataset"
+    val_ds.prefetch(tf.data.AUTOTUNE).save(save_val_ds_path, shard_func=shard_func)
+    val_ds_cardinality = tf.data.experimental.cardinality(val_ds)
+    val_ds_size = val_ds_cardinality.numpy() * BATCH_SIZE
+    print(f">>> Validation tf.dataset saved. Cardinality: {val_ds_cardinality}, size: {val_ds_size}.")
+
+    # generate metadata file
+    generate_metadata_file(new_landmark_files_dirpath, sign_ids=s2p_map, batch_size=BATCH_SIZE,
+                           data_columns=DATA_COLUMNS, num_shards=NUM_SHARDS, val_size=VAL_SIZE, len_train=len(df_train), len_val=len(df_val),
+                           grouping_by_participant=GROUPING_BY_PARTICIPANT, limit_participants=LIMIT_PARTICIPANTS)
 
 
 if __name__ == "__main__":

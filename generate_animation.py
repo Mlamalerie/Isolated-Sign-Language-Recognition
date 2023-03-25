@@ -14,7 +14,15 @@ from threading import get_ident
 from threading import get_native_id
 
 
-def draw_frame(frame, df_landmark, sign, fig):
+def draw_frame(frame : int, df_landmark: pd.DataFrame, sign: str, fig: plt.Figure, display_face_idx: bool = False):
+    """ Draw landmarks for a given frame.
+
+    Args:
+        frame (int): frame number
+        df_landmark (pd.DataFrame): dataframe containing landmarks
+        sign (str): sign name
+        fig (plt.Figure): figure to draw on
+    """
     lms = [lm for _, lm in df_landmark.query("frame == @frame").groupby("type")]
     artists = []
     # add sup title
@@ -29,13 +37,21 @@ def draw_frame(frame, df_landmark, sign, fig):
         if first_row_type == "face":
             ax.set_title(title)
             artist = ax.scatter(lm["x"], lm["y_"])
+            # add face index
+            if display_face_idx:
+                lm["landmark_index"] = lm["row_id"].str.split("-").str[-1].astype(int)
+                ax.text(lm["x"], lm["y_"], lm["landmark_index"], fontsize=8)
             artists.append(artist)
 
         elif first_row_type in ["left_hand", "right_hand", "pose"]:
             ax.set_title(title)
             artist = ax.scatter(lm["x"], lm["y_"])
             artists.append(artist)
-            connections = mp.solutions.hands.HAND_CONNECTIONS if not first_row_type == "pose" else mp.solutions.pose.POSE_CONNECTIONS
+            connections = (
+                mp.solutions.hands.HAND_CONNECTIONS
+                if first_row_type != "pose"
+                else mp.solutions.pose.POSE_CONNECTIONS
+            )
             for connection in connections:
                 point_a = connection[0]
                 point_b = connection[1]
