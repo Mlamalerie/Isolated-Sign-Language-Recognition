@@ -68,11 +68,11 @@ def verify_sequences_landmarks_df(df: pd.DataFrame) -> bool:
     n_rows = len(df)
 
     # check if all landmarks are present
-    if not set(df["type"].unique()) == SET_LANDMARKS_TYPES:
+    if set(df["type"].unique()) != SET_LANDMARKS_TYPES:
         return False, "Invalid landmarks types"
-    if not set(row_id_unique_names) == SET_LANDMARKS:
+    if set(row_id_unique_names) != SET_LANDMARKS:
         return False, "Invalid number of landmarks"
-    if not n_rows % len(SET_LANDMARKS) == 0:
+    if n_rows % len(SET_LANDMARKS) != 0:
         return False, "Invalid number of rows"
 
     return True, "Valid dataframe"
@@ -165,7 +165,7 @@ def main():
 
     parquet_paths_train = df_train["path"].tolist()
     # for each path in df_train, preprocess the parquet file and save it in the output_dir_path
-    print(f"Preprocessing train landmark files...")
+    print("Preprocessing train landmark files...")
     with ThreadPoolExecutor(max_workers=N_WORKERS) as executor:
         futures = list(tqdm(executor.map(
             lambda parquet_path: task(parquet_path, output_dirname=f"{new_train_landmark_files_dirname}/train",
@@ -174,7 +174,7 @@ def main():
 
     parquet_paths_val = df_val["path"].tolist()
     # for each path in df_val, preprocess the parquet file and save it in the output_dir_path
-    print(f"Preprocessing val landmark files...")
+    print("Preprocessing val landmark files...")
     with ThreadPoolExecutor(max_workers=N_WORKERS) as executor:
         futures = list(tqdm(executor.map(
             lambda parquet_path: task(parquet_path, output_dirname=f"{new_train_landmark_files_dirname}/val",
